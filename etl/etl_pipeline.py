@@ -467,8 +467,10 @@ def save_boxplot(df, value_col, title, out_path, logger=None):
     Save a boxplot image to file.
     """
     try:
-        if logger:
-            logger.info("Saving boxplot: %s", out_path)
+        
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Saving boxplot: %s", out_path)
 
         plt.figure(figsize=(12, 5))
         sns.boxplot(x=df[value_col].dropna())
@@ -478,12 +480,10 @@ def save_boxplot(df, value_col, title, out_path, logger=None):
         plt.savefig(out_path)
         plt.close()
 
-        if logger:
-            logger.info("Boxplot saved successfully: %s", out_path)
+        logger.info("Boxplot saved successfully: %s", out_path)
 
     except Exception as exc:
-        if logger:
-            logger.exception("Failed to save boxplot | Error: %s", exc)
+        logger.exception("Failed to save boxplot | Error: %s", exc)
         raise
 
 # ============================================================
@@ -629,10 +629,14 @@ def clean_sales(sales, calendar, logger):
         if "units_sold" in sales.columns:
             sales["units_sold"] = pd.to_numeric(sales["units_sold"], errors="coerce").fillna(0)
 
-        # Prefer calendar flags (single source of truth)
-        cal_cols = [c for c in ["day_of_week", "promo_flag", "holiday_flag"] if c in calendar.columns]
-        if cal_cols:
-            sales = sales.merge(calendar[["date"] + cal_cols], on="date", how="left")
+        # Ensure calendar-derived columns ALWAYS exist
+        for col in ["day_of_week", "promo_flag", "holiday_flag"]:
+            if col not in sales.columns:
+                logger.warning("Calendar column '%s' missing in sales. Filling with 0.", col)   
+                sales[col] = 0
+            else:
+                sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0).astype(int)        
+        
 
         # Fill missing dates as 0 sales
         sales = ensure_complete_daily_grid(
@@ -716,12 +720,12 @@ def build_fact_sales(sales, logger):
         df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
         df["margin_proxy"] = pd.to_numeric(df["margin_proxy"], errors="coerce").fillna(0)
 
-        # Ensure flags exist
+        
+        # Calendar flags must be integers
         for col in ["promo_flag", "holiday_flag", "day_of_week"]:
-            if col not in df.columns:
-                df[col] = 0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
+        logger.info("fact_sales_store_sku_daily built successfully")
         return df
 
     except Exception as exc:
@@ -769,7 +773,7 @@ def build_fact_inventory(inventory, sales, config, logger):
         out = df[
             [
                 "date", "store_id", "sku_id",
-                "on_hand_units", "stockout_flag", "days_of_cover",
+                "on_hand_units", "stockout_flag", "days_of_cover"
             ]
         ].copy()
 
@@ -900,9 +904,9 @@ def run_pipeline():
             save_boxplot(sales, "units_sold", "Boxplot – units_sold", plot_path, logger)
 
         # Build curated outputs (your existing build_fact_* functions can be reused)
-        fact_sales = build_fact_sales(sales, products)
-        fact_inventory = build_fact_inventory(inventory, sales)
-        repl_inputs = build_replenishment_inputs(sales, purchase_orders, products)
+        fact_sales = build_fact_sales(sales, logger)
+        fact_inventory = build_fact_inventory(inventory, sales, CONFIG, logger)
+        repl_inputs = build_replenishment_inputs(sales, purchase_orders, products, CONFIG, logger)
 
         # Save outputs
         out_sales_path = PATHS["output"] / CONFIG.out_fact_sales
