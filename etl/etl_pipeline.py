@@ -799,24 +799,29 @@ def build_replenishment_inputs(sales, purchase_orders, products, config, logger)
         logger.info("Building replenishment_inputs_store_sku")
 
         max_date = sales["date"].max()
-        start = max_date - pd.Timedelta(days=config.demand_window_days - 1)
-        recent = sales.loc[(sales["date"] >= start) & (sales["date"] <= max_date)].copy()
+        start = max_date - pd.Timedelta(days=config.demand_window_days - 1) # Use demand_window_days for demand stats calculation
+        recent = sales.loc[(sales["date"] >= start) & (sales["date"] <= max_date)].copy() # Focus on recent demand for replenishment inputs
 
+        # Calculate demand stats for each store-sku
         stats = (
             recent.groupby(["store_id", "sku_id"], as_index=False)["units_sold"]
             .agg(avg_daily_demand="mean", demand_std_dev="std")
         )
-        stats["demand_std_dev"] = stats["demand_std_dev"].fillna(0.0)
+        stats["demand_std_dev"] = stats["demand_std_dev"].fillna(0.0) # If only one data point, std dev is NaN. Treat as 0 variability.
 
+        # Calculate average lead time from purchase orders
         lead_time = (
             purchase_orders.groupby(["store_id", "sku_id"], as_index=False)["lead_time_days"]
             .mean()
         )
 
+        # Merge demand stats with lead time
         df = stats.merge(lead_time, on=["store_id", "sku_id"], how="left")
+
+        # Fill missing lead times with global median or a default value (e.g., 3 days)
         global_median_lt = purchase_orders["lead_time_days"].median() if "lead_time_days" in purchase_orders.columns else 3
         df["lead_time_days"] = df["lead_time_days"].fillna(global_median_lt)
-        df["lead_time_days"] = df["lead_time_days"].clip(lower=0)
+        df["lead_time_days"] = df["lead_time_days"].clip(lower=0) # Ensure no negative lead times
 
         df = df.merge(products[["sku_id", "category"]], on="sku_id", how="left")
 
@@ -834,7 +839,7 @@ def build_replenishment_inputs(sales, purchase_orders, products, config, logger)
         # Z-score
         try:
             from scipy.stats import norm
-            df["z_score"] = df["service_level_target"].apply(lambda x: float(norm.ppf(x)))
+            df["z_score"] = df["service_level_target"].apply(lambda x: float(norm.ppf(x))) 
         except Exception:
             approx = {0.90: 1.282, 0.94: 1.555, 0.95: 1.645, 0.96: 1.751, 0.97: 1.881, 0.98: 2.054, 0.99: 2.326}
             df["z_score"] = df["service_level_target"].round(2).map(approx).fillna(1.645)
