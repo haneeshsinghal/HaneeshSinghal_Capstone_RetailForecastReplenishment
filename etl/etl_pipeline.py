@@ -4,303 +4,133 @@ import subprocess
 import logging
 from pathlib import Path
 
+REQUIRED_FILES = {
+    "stores": "stores.csv",
+    "products": "products.json",
+    "inventory": "inventory_daily.csv",
+    "sales": "sales_daily.csv",
+    "purchase_orders": "purchase_orders.csv",
+    "calendar": "calendar.csv",
+}
 
-# ============================================================
-# LOGGER SETUP
-# ============================================================
-def setup_logger(logs_dir, log_file_name):
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / log_file_name
+LOG_LEVEL = "INFO"
 
-    logger = logging.getLogger("retail_etl")
-    logger.setLevel(logging.INFO)
-
+# Setup logging
+def setup_logging(log_file, level):
+    logger = logging.getLogger("retail_elt")
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+    numeric_level = getattr(logging, str(level).upper(), logging.INFO)
+    logger.setLevel(numeric_level)
+
+    fmt = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.INFO)
+    log_file = Path(log_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(numeric_level)
+    file_handler.setFormatter(fmt)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(numeric_level)
+    console_handler.setFormatter(fmt)
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-
+    logger.propagate = False
     return logger
 
-
-# ============================================================
-# PROJECT ROOT DISCOVERY
-# ============================================================
-def find_project_root(logger=None):
-    """
-    Find project root by walking upward from script location and cwd.
-    Preference is given to directories containing requirements.txt
-    or multiple expected data files.
-    """
-    candidates = []
-
-    try:
-        candidates.append(Path(__file__).resolve().parent)
-        logger.info("Using script location as root candidate")
-    except Exception as exc:
-        logger.warning(f"Unable to resolve __file__: {exc}")
-
-    candidates.append(Path.cwd().resolve())
-    logger.info("Using current working directory as root candidate")
-
-    def score_dir(folder):
-        try:
-            names = {p.name for p in folder.iterdir()}
-        except Exception:
-            return 0
-
-        score = 0
-        if "requirements.txt" in names:
-            score += 10
-
-        expected_files = {
-            "sales_daily.csv",
-            "inventory_daily.csv",
-            "products.json",
-            "purchase_orders.csv",
-            "calendar.csv",
-            "stores.csv",
-        }
-        score += sum(1 for f in expected_files if f in names)
-        return score
-
-    best_dir = None
-    best_score = -1
-
-    for start in candidates:
-        for parent in [start] + list(start.parents):
-            s = score_dir(parent)
-            if s > best_score:
-                best_score = s
-                best_dir = parent
-            if s >= 12:
-                logger.info(f"Strong project root identified: {parent}")
-                return parent
-
-    logger.info(f"Fallback project root selected: {best_dir}")
-
-    return best_dir if best_dir else candidates[0]
-
-
-# ============================================================
-# FILE DISCOVERY
-# ============================================================
-def find_file(root, filename, logger=None):
-    """
-    Recursively find a file under root.
-    Skips common generated/system folders.
-    """
-    skip_dirs = {
-        "output", "logs", "__pycache__", ".git",
-        ".venv", "venv", "env", ".mypy_cache"
-    }
-
-    try:
-        for p in root.rglob(filename):
-            if any(part in skip_dirs for part in p.parts):
-                continue
-            if p.is_file():
-                logger.info(f"Found file '{filename}' at {p}")
-                return p
-    except Exception as exc:
-        logger.error(f"Error while searching for {filename}: {exc}", exc_info=True)
-
-    logger.warning(f"File not found: {filename}")
-    return None
-
-# This function builds the FOUND_FILES dictionary based on the file paths discovered in the configuration.
-def build_found_files(config, logger):
-    """
-    Build FOUND_FILES dict from discovered config file paths.
-    """
-    found = {
-        "sales": config.sales_file,
-        "inventory": config.inventory_file,
-        "products": config.products_file,
-        "purchase_orders": config.purchase_orders_file,
-        "calendar": config.calendar_file,
-        "stores": config.stores_file,
-    }
-
-    missing = [k for k, v in found.items() if v is None]
-    if missing:
-        logger.error("Missing required file paths for: %s", missing)
-        raise FileNotFoundError("Missing required files: " + ", ".join(missing))
-
-    return found
-
-# ============================================================
-# DIRECTORY CREATION
-# ============================================================
-def ensure_dirs(dirs, logger=None):
-    for d in dirs:
-        try:
-            Path(d).mkdir(parents=True, exist_ok=True)
-            logger.info(f"Ensured directory exists: {d}")
-        except Exception as exc:
-            logger.error(f"Failed to create directory {d}: {exc}", exc_info=True)
-            raise
-
-# ============================================================
-# BUILD PATHS DICT
-# ============================================================
-
-# This function builds the PATHS dictionary based on the provided configuration.
-def build_paths(config):
-    """
-    Build PATHS dict used by the pipeline.
-    """
-    return {
-        "output": config.output_dir,
-        "plots": config.plots_dir,
-        "logs": config.logs_dir
-    }
-
-
-# ============================================================
-# INSTALL REQUIRED PACKAGES
-# ============================================================
-def install_packages(requirements_path, logger=None):
-    if requirements_path and requirements_path.exists():
-        try:
-            logger.info(f"Installing dependencies from {requirements_path}")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "-r", str(requirements_path)]
-            )
-            logger.info("Dependency installation completed successfully")
-        except subprocess.CalledProcessError as exc:
-            logger.error("Dependency installation failed", exc_info=True)
-            raise
-    else:
-        logger.warning("requirements.txt not found. Skipping dependency installation.")
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-class PipelineConfig:
-    def __init__(self):
-        # Temporary logger for bootstrap
-        bootstrap_logger = logging.getLogger("bootstrap")
-        bootstrap_logger.addHandler(logging.StreamHandler(sys.stdout))
-        bootstrap_logger.setLevel(logging.INFO)
-
-        # Discover project root
-        self.project_root = find_project_root(bootstrap_logger)
-
-        # Directories
-        self.output_dir = self.project_root / "data"
-        self.logs_dir = self.project_root / "logs"
-        self.plots_dir = self.output_dir / "plots"
-
-        # Logger (real)
-        self.log_file_name = "retail_demand_forecasting.log"
-        self.logger = setup_logger(self.logs_dir, self.log_file_name)
-
-        self.logger.info("Pipeline configuration initialization started")
-        self.logger.info(f"Project root resolved to: {self.project_root}")
-
-        # Discover raw files
-        self.sales_file = find_file(self.project_root, "sales_daily.csv", self.logger)
-        self.inventory_file = find_file(self.project_root, "inventory_daily.csv", self.logger)
-        self.products_file = find_file(self.project_root, "products.json", self.logger)
-        self.purchase_orders_file = find_file(self.project_root, "purchase_orders.csv", self.logger)
-        self.calendar_file = find_file(self.project_root, "calendar.csv", self.logger)
-        self.stores_file = find_file(self.project_root, "stores.csv", self.logger)
-
-        # Check that all required files were found
-        required = {
-            "sales_daily.csv": self.sales_file,
-            "inventory_daily.csv": self.inventory_file,
-            "products.json": self.products_file,
-            "purchase_orders.csv": self.purchase_orders_file,
-            "calendar.csv": self.calendar_file,
-            "stores.csv": self.stores_file,
-        }
-
-        missing = [k for k, v in required.items() if v is None]
-        if missing:
-            self.logger.error("Missing required raw files:")
-            for f in missing:
-                self.logger.error(f" - {f}")
-            raise FileNotFoundError(
-                "Missing required raw file(s):\n- " + "\n- ".join(missing)
-            )
-
-        # Output filenames
-        self.out_fact_sales = "fact_sales_store_sku_daily.csv"
-        self.out_fact_inventory = "fact_inventory_store_sku_daily.csv"
-        self.out_replenishment = "replenishment_inputs_store_sku.csv"
-
-        # requirements.txt
-        self.required_library_path = find_file(self.project_root, "requirements.txt", self.logger)
-
-        # Windows
-        self.demand_window_days = 56
-        self.cover_window_days = 28
-
-        self.logger.info("Pipeline configuration initialized successfully")
-
-# ============================================================
-# THIRD-PARTY IMPORTS (after install step)
-# ============================================================
-import logging
-import numpy as np
-import pandas as pd
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
-
-# Utility function to print a banner in logs
+# Function to print a banner in logs
 def log_banner(logger, title):
-    """
-    Prints a readable section header using the logger.
-    (Logger handlers will print to console and log file in the same format.)
-    """
-    line = "=" * 78
+    line = "=" * 88
     logger.info("")
     logger.info(line)
     logger.info(title)
     logger.info(line)
 
+# Ensure directories exist
+def ensure_dirs(paths):
+    for p in paths:
+        Path(p).mkdir(parents=True, exist_ok=True)
+
+# Install required packages
+def install_package(package_file, logger):
+    try:
+        if not os.path.exists(package_file):
+            logger.warning("requirements.txt not found at %s — skipping install", package_file)
+            return
+
+        logger.info("Installing dependencies from %s", package_file)
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "-r", str(package_file)
+        ])
+        logger.info("Dependency installation completed successfully")
+
+    except subprocess.CalledProcessError as exc:
+        logger.exception("pip install failed | Error: %s", exc)
+        raise
+
+# Resolve required input files and ensure they exist, returning a dict of absolute paths
+def resolve_inputs_raw_files(base_dir, required_files, logger):
+    base_dir = Path(base_dir).resolve()
+    missing = []
+    found = {}
+
+    for key, fname in required_files.items():
+        file_path_name = base_dir / fname
+        if not file_path_name.exists():
+            missing.append(fname)
+        else:
+            found[key] = file_path_name.resolve()
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing required input files next to script: "
+            + ", ".join(missing)
+            + "\nExpected directory: "
+            + str(base_dir)
+        )
+
+    logger.info("All required inputs found next to script in: %s", base_dir)
+    return found
+
+
+# ============================================================
+# THIRD-PARTY IMPORTS (after install step)
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import norm
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+
+
 # Utility function to read CSV safely and drop unnamed columns
 def read_csv_safely(path, logger, **kwargs):
-    """
-    Read CSV and drop accidental 'Unnamed' columns (often created by trailing commas).
-    """
     try:
+        path = Path(path)
         logger.info("Reading CSV: %s", path)
         df = pd.read_csv(path, **kwargs)
 
-        # Remove any extra unnamed columns
-        unnamed_cols = [c for c in df.columns if str(c).lower().startswith("unnamed")]
-        if unnamed_cols:
-            logger.warning("Dropping unnamed columns: %s", unnamed_cols)
-            df = df.drop(columns=unnamed_cols)
+        unnamed = [c for c in df.columns if str(c).lower().startswith("unnamed")]
+        if unnamed:
+            logger.warning("Dropping unnamed columns from %s: %s", path.name, unnamed)
+            df = df.drop(columns=unnamed)
 
         return df
-
     except FileNotFoundError:
         logger.error("CSV file not found: %s", path)
         raise
@@ -311,10 +141,8 @@ def read_csv_safely(path, logger, **kwargs):
 
 # Utility function to read JSON safely
 def read_json_safely(path, logger):
-    """
-    Read JSON safely.
-    """
     try:
+        path = Path(path)
         logger.info("Reading JSON: %s", path)
         return pd.read_json(path)
     except FileNotFoundError:
@@ -326,9 +154,6 @@ def read_json_safely(path, logger):
 
 # Utility function to standardize ID columns by stripping spaces and converting to uppercase
 def standardize_ids(df, cols, logger=None):
-    """
-    Standardize ID columns: strip spaces and convert to uppercase.
-    """
     try:
         for col in cols:
             if col in df.columns:
@@ -341,12 +166,9 @@ def standardize_ids(df, cols, logger=None):
 
 # Utility function to normalize category columns to lowercase snake_case
 def normalize_category(series):
-    """
-    Normalize category values to lowercase snake_case.
-    Example: 'Home Care' -> 'home_care'
-    """
     return (
-        series.astype(str)
+        series.fillna("unknown")
+        .astype(str)
         .str.strip()
         .str.lower()
         .str.replace(r"\s+", "_", regex=True)
@@ -354,10 +176,6 @@ def normalize_category(series):
 
 # Utility function to coerce datetime columns safely
 def coerce_datetime(df, col, logger=None):
-    """
-    Convert a column to datetime safely.
-    Invalid values become NaT (not a time).
-    """
     try:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -368,60 +186,41 @@ def coerce_datetime(df, col, logger=None):
         raise
 
 # Utility function to create a complete daily grid for each store-SKU combination
-def ensure_complete_daily_grid(df, date_col, key_cols, value_cols, fill_value, logger=None):
-    """
-    Ensure every store-SKU has a continuous daily series.
-    This is intentionally written in a very readable way.
-
-    How it works:
-    1) Determine global min/max date
-    2) For each store-sku group, reindex on full date range
-    3) Fill missing values with fill_value
-    """
+def ensure_complete_daily_grid(df, date_col, key_cols, logger, min_date=None, max_date=None):
     try:
-        df = df.copy()
-        df = coerce_datetime(df, date_col, logger)
+        out = df.copy()
+        out = coerce_datetime(out, date_col,logger)
 
-        min_date = df[date_col].min()
-        max_date = df[date_col].max()
+        if min_date is None:
+            min_date = out[date_col].min()
+        if max_date is None:
+            max_date = out[date_col].max()
 
         if pd.isna(min_date) or pd.isna(max_date):
-            # If date column is broken, fail early with a clear message
-            raise ValueError("Date column contains no valid dates after parsing.")
+            raise ValueError("%s contains no valid dates after parsing." % date_col)
 
         all_dates = pd.date_range(min_date, max_date, freq="D")
+        logger.info(
+            "Building complete daily grid %s..%s for keys=%s",
+            str(min_date.date()), str(max_date.date()), key_cols
+        )
 
-        if logger:
-            logger.info(
-                "Creating complete daily grid | %s to %s | keys=%s",
-                str(min_date.date()), str(max_date.date()), key_cols
-            )
-
-        out_parts = []
-        grouped = df.groupby(key_cols, dropna=False)
+        parts = []
+        grouped = out.groupby(key_cols, dropna=False)
 
         for keys, g in grouped:
             g = g.sort_values(date_col).set_index(date_col)
-
-            # Reindex to full daily range
             g = g.reindex(all_dates)
 
-            # Fill value columns
-            for vc in value_cols:
-                if vc in g.columns:
-                    g[vc] = g[vc].fillna(fill_value)
-
-            # Put key cols back
             if not isinstance(keys, tuple):
                 keys = (keys,)
             for i, kc in enumerate(key_cols):
                 g[kc] = keys[i]
 
             g = g.reset_index().rename(columns={"index": date_col})
-            out_parts.append(g)
+            parts.append(g)
 
-        out = pd.concat(out_parts, ignore_index=True)
-        return out
+        return pd.concat(parts, ignore_index=True)
 
     except Exception as exc:
         if logger:
@@ -433,28 +232,24 @@ def ensure_complete_daily_grid(df, date_col, key_cols, value_cols, fill_value, l
 # ============================================================
 
 # This is a simple implementation of outlier detection using the IQR method.
-def add_outlier_flag_iqr_by_group(df, group_cols, value_col, flag_col, logger=None):
-    """
-    Flag outliers using IQR rule within each group.
-    Outlier rule:
-      value < Q1 - 1.5*IQR OR value > Q3 + 1.5*IQR
-    """
+def add_outlier_flag_iqr_by_group(df, group_cols, value_col, flag_col, logger):
     try:
-        df = df.copy()
+        out = df.copy()
+        if value_col not in out.columns:
+            logger.warning("Value column %s not present; cannot compute outliers.", value_col)
+            out[flag_col] = False
+            return out
 
-        q1 = df.groupby(group_cols)[value_col].transform(lambda s: s.quantile(0.25))
-        q3 = df.groupby(group_cols)[value_col].transform(lambda s: s.quantile(0.75))
+        q1 = out.groupby(group_cols)[value_col].transform(lambda s: s.quantile(0.25))
+        q3 = out.groupby(group_cols)[value_col].transform(lambda s: s.quantile(0.75))
         iqr = q3 - q1
 
         lower = q1 - 1.5 * iqr
         upper = q3 + 1.5 * iqr
 
-        df[flag_col] = (df[value_col] < lower) | (df[value_col] > upper)
-
-        if logger:
-            logger.info("Outlier flag added: %s (based on %s)", flag_col, value_col)
-
-        return df
+        out[flag_col] = (out[value_col] < lower) | (out[value_col] > upper)
+        logger.info("Outlier flag added: %s (IQR by %s on %s)", flag_col, group_cols, value_col)
+        return out
 
     except Exception as exc:
         if logger:
@@ -462,15 +257,15 @@ def add_outlier_flag_iqr_by_group(df, group_cols, value_col, flag_col, logger=No
         raise
 
 # This function saves a boxplot of the specified value column to the given path.
-def save_boxplot(df, value_col, title, out_path, logger=None):
-    """
-    Save a boxplot image to file.
-    """
-    try:
-        
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+def save_boxplot(df, value_col, title, out_path, logger):
+    try:        
+        if value_col not in df.columns:
+            logger.warning("Cannot save boxplot: %s not present.", value_col)
+            return
 
-        logger.info("Saving boxplot: %s", out_path)
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving boxplot -> %s", out_path)
 
         plt.figure(figsize=(12, 5))
         sns.boxplot(x=df[value_col].dropna())
@@ -487,37 +282,6 @@ def save_boxplot(df, value_col, title, out_path, logger=None):
         raise
 
 # ============================================================
-# LOAD RAW DATA (USING FOUND_FILES DICT)
-# ============================================================
-
-# This function loads all required datasets from the file paths discovered in FOUND_FILES.
-def load_raw_datasets(found_files, logger):
-    """
-    Load all required datasets from discovered file paths.
-    found_files should contain absolute paths.
-    """
-    try:
-        log_banner(logger, "Loading Raw Datasets")
-
-        sales = read_csv_safely(found_files["sales"], logger)
-        inventory = read_csv_safely(found_files["inventory"], logger)
-        calendar = read_csv_safely(found_files["calendar"], logger)
-        purchase_orders = read_csv_safely(found_files["purchase_orders"], logger)
-        stores = read_csv_safely(found_files["stores"], logger)
-        products = read_json_safely(found_files["products"], logger)
-
-        logger.info("Raw datasets loaded successfully")
-        return sales, inventory, products, calendar, purchase_orders, stores
-
-    except KeyError as exc:
-        logger.error("Missing key in FOUND_FILES: %s", exc)
-        raise
-    except Exception as exc:
-        logger.exception("Failed to load raw datasets | Error: %s", exc)
-        raise
-
-
-# ============================================================
 # CLEANING & STANDARDIZATION (SIMPLIFIED)
 # ============================================================
 
@@ -525,15 +289,15 @@ def load_raw_datasets(found_files, logger):
 def clean_calendar(calendar, logger):
     try:
         logger.info("Cleaning calendar")
-        calendar = calendar.copy()
-        calendar = coerce_datetime(calendar, "date", logger)
+        cal = calendar.copy()
+        cal = coerce_datetime(cal, "date", logger)
 
         for col in ["day_of_week", "is_weekend", "promo_flag", "holiday_flag"]:
-            if col in calendar.columns:
-                calendar[col] = pd.to_numeric(calendar[col], errors="coerce").fillna(0).astype(int)
+            if col in cal.columns:
+                cal[col] = pd.to_numeric(cal[col], errors="coerce").fillna(0).astype(int)
 
-        calendar = calendar.drop_duplicates(subset=["date"]).sort_values("date")
-        return calendar
+        cal = cal.drop_duplicates(subset=["date"]).sort_values("date")
+        return cal
 
     except Exception as exc:
         logger.exception("Failed to clean calendar | Error: %s", exc)
@@ -543,20 +307,18 @@ def clean_calendar(calendar, logger):
 def clean_stores(stores, logger):
     try:
         logger.info("Cleaning stores")
-        stores = stores.copy()
-        stores = standardize_ids(stores, ["store_id"], logger)
+        st = stores.copy()
+        st = standardize_ids(st, ["store_id"], logger)
 
-        if "region" in stores.columns:
-            stores["region"] = stores["region"].astype(str).str.strip().str.upper()
+        if "region" in st.columns:
+            st["region"] = st["region"].astype(str).str.strip().str.upper()
+        if "city_tier" in st.columns:
+            st["city_tier"] = pd.to_numeric(st["city_tier"], errors="coerce")
+        if "store_size" in st.columns:
+            st["store_size"] = st["store_size"].astype(str).str.strip().str.upper()
 
-        if "city_tier" in stores.columns:
-            stores["city_tier"] = pd.to_numeric(stores["city_tier"], errors="coerce")
-
-        if "store_size" in stores.columns:
-            stores["store_size"] = stores["store_size"].astype(str).str.strip().str.upper()
-
-        stores = stores.drop_duplicates(subset=["store_id"])
-        return stores
+        st = st.drop_duplicates(subset=["store_id"])
+        return st
 
     except Exception as exc:
         logger.exception("Failed to clean stores | Error: %s", exc)
@@ -566,27 +328,27 @@ def clean_stores(stores, logger):
 def clean_products(products, logger):
     try:
         logger.info("Cleaning products")
-        products = products.copy()
-        products = standardize_ids(products, ["sku_id"], logger)
+        pr = products.copy()
+        pr = standardize_ids(pr, ["sku_id"], logger)
 
-        if "category" in products.columns:
-            products["category"] = normalize_category(products["category"])
+        if "category" in pr.columns:
+            pr["category"] = normalize_category(pr["category"])
 
         for col in ["price", "cost", "shelf_life_days", "moq_units"]:
-            if col in products.columns:
-                products[col] = pd.to_numeric(products[col], errors="coerce")
+            if col in pr.columns:
+                pr[col] = pd.to_numeric(pr[col], errors="coerce")
 
-        return products
+        return pr
 
     except Exception as exc:
         logger.exception("Failed to clean products | Error: %s", exc)
         raise
 
 # Function to clean and standardize the purchase orders dataset
-def clean_purchase_orders(po, logger):
+def clean_purchase_orders(purchase_orders, logger):
     try:
-        logger.info("Cleaning purchase orders")
-        po = po.copy()
+        logger.info("Cleaning purchase_orders")
+        po = purchase_orders.copy()
         po = standardize_ids(po, ["po_id", "store_id", "sku_id"], logger)
 
         po = coerce_datetime(po, "order_date", logger)
@@ -596,14 +358,19 @@ def clean_purchase_orders(po, logger):
             if col in po.columns:
                 po[col] = pd.to_numeric(po[col], errors="coerce")
 
-        # Deduplicate by po_id
         if "po_id" in po.columns:
             po = po.drop_duplicates(subset=["po_id"], keep="first")
+        else:
+            subset = []
+            for c in ["store_id", "sku_id", "order_date", "expected_receipt_date", "order_qty"]:
+                if c in po.columns:
+                    subset.append(c)
+            if subset:
+                po = po.drop_duplicates(subset=subset, keep="first")
 
-        # Infer lead_time_days if missing and dates exist
-        if "lead_time_days" in po.columns:
+        if "lead_time_days" in po.columns and "order_date" in po.columns and "expected_receipt_date" in po.columns:
             missing = po["lead_time_days"].isna()
-            if missing.any() and {"order_date", "expected_receipt_date"}.issubset(po.columns):
+            if missing.any():
                 inferred = (po.loc[missing, "expected_receipt_date"] - po.loc[missing, "order_date"]).dt.days
                 po.loc[missing, "lead_time_days"] = inferred
 
@@ -612,341 +379,513 @@ def clean_purchase_orders(po, logger):
     except Exception as exc:
         logger.exception("Failed to clean purchase orders | Error: %s", exc)
         raise
-
-# Function to clean and standardize the sales dataset, merging calendar flags and ensuring complete daily grid
-def clean_sales(sales, calendar, logger):
-    try:
-        logger.info("Cleaning sales")
-        sales = sales.copy()
-        sales = standardize_ids(sales, ["store_id", "sku_id"], logger)
-        sales = coerce_datetime(sales, "date", logger)
-
-        # Aggregate duplicates by summing numeric columns
-        numeric_cols = [c for c in sales.columns if c not in ["date", "store_id", "sku_id"]]
-        agg = {c: "sum" for c in numeric_cols}
-        sales = sales.groupby(["date", "store_id", "sku_id"], as_index=False).agg(agg)
-
-        if "units_sold" in sales.columns:
-            sales["units_sold"] = pd.to_numeric(sales["units_sold"], errors="coerce").fillna(0)
-
-        # Ensure calendar-derived columns ALWAYS exist
-        for col in ["day_of_week", "promo_flag", "holiday_flag"]:
-            if col not in sales.columns:
-                logger.warning("Calendar column '%s' missing in sales. Filling with 0.", col)   
-                sales[col] = 0
-            else:
-                sales[col] = pd.to_numeric(sales[col], errors="coerce").fillna(0).astype(int)        
-        
-
-        # Fill missing dates as 0 sales
-        sales = ensure_complete_daily_grid(
-            sales,
-            date_col="date",
-            key_cols=["store_id", "sku_id"],
-            value_cols=["units_sold"],
-            fill_value=0.0,
-            logger=logger
-        )
-
-        return sales
-
-    except Exception as exc:
-        logger.exception("Failed to clean sales | Error: %s", exc)
-        raise
-
-# Function to clean and standardize the inventory dataset
-def clean_inventory(inventory, logger):
-    try:
-        logger.info("Cleaning inventory")
-        inventory = inventory.copy()
-        inventory = standardize_ids(inventory, ["store_id", "sku_id"], logger)
-        inventory = coerce_datetime(inventory, "date", logger)
-
-        if "on_hand_close" in inventory.columns:
-            inventory["on_hand_close"] = pd.to_numeric(inventory["on_hand_close"], errors="coerce")
-
-        # Keep last snapshot per day
-        inventory = inventory.sort_values(["date"]).drop_duplicates(
-            subset=["date", "store_id", "sku_id"], keep="last"
-        )
-
-        # Forward fill within store-sku, then 0
-        inventory = inventory.sort_values(["store_id", "sku_id", "date"])
-        inventory["on_hand_close"] = inventory.groupby(["store_id", "sku_id"])["on_hand_close"].ffill().fillna(0)
-
-        inventory = ensure_complete_daily_grid(
-            inventory,
-            date_col="date",
-            key_cols=["store_id", "sku_id"],
-            value_cols=["on_hand_close"],
-            fill_value=0.0,
-            logger=logger
-        )
-
-        return inventory
-
-    except Exception as exc:
-        logger.exception("Failed to clean inventory | Error: %s", exc)
-        raise
     
 # ============================================================
 # CURATED OUTPUT BUILDERS (MISSING METHODS ADDED)
 # ============================================================
 
 # Function to build the fact_sales_store_sku_daily dataset by merging sales with product info and calculating revenue and margin proxy
-def build_fact_sales(sales, logger):
-    """
-    Output 1: fact_sales_store_sku_daily.csv
-    Required columns:
-      date, store_id, sku_id, units_sold, revenue, margin_proxy,
-      promo_flag, holiday_flag, day_of_week
-    """
+def build_fact_sales(sales, calendar, products, logger):
     try:
         logger.info("Building fact_sales_store_sku_daily")
 
-        required_cols = [
-            "date", "store_id", "sku_id",
-            "units_sold", "revenue", "margin_proxy",
-            "promo_flag", "holiday_flag", "day_of_week"
+        out = sales.copy()
+        # Standardize identifiers
+        out = standardize_ids(out, ["store_id", "sku_id"], logger)
+
+        # Date handling
+        out = coerce_datetime(out, "date", logger)
+
+        # Units sold
+        if "units_sold" in out.columns:
+            out["units_sold"] = pd.to_numeric(out["units_sold"], errors="coerce").fillna(0.0)
+        else:
+            logger.warning("sales missing units_sold; defaulting to 0")
+            out["units_sold"] = 0.0
+
+        # Deduplicate: sum units per day-store-sku
+        out = (
+            out.groupby(["date", "store_id", "sku_id"], as_index=False)
+               .agg({"units_sold": "sum"})
+        )
+
+        # Ensure continuous daily series
+        out = ensure_complete_daily_grid(
+            out,
+            date_col="date",
+            key_cols=["store_id", "sku_id"],
+            logger=logger
+        )
+
+        # Calendar enrichment
+        cal_cols = ["date", "day_of_week", "promo_flag", "holiday_flag"]
+        cal_cols = [c for c in cal_cols if c in calendar.columns]
+
+        calendar_clean = calendar[cal_cols].drop_duplicates(subset=["date"])
+        out = out.merge(calendar_clean, on="date", how="left")
+
+        for c in ["day_of_week", "promo_flag", "holiday_flag"]:
+            if c not in out.columns:
+                out[c] = 0
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
+
+        # Product enrichment (price, cost)
+        prod_cols = ["sku_id"]
+        if "price" in products.columns:
+            prod_cols.append("price")
+        if "cost" in products.columns:
+            prod_cols.append("cost")
+
+        products_clean = (
+            products[prod_cols]
+            .drop_duplicates(subset=["sku_id"])
+            .copy()
+        )
+
+        out = out.merge(products_clean, on="sku_id", how="left")
+
+        # Revenue
+        if "price" in out.columns:
+            out["price"] = pd.to_numeric(out["price"], errors="coerce").fillna(0.0)
+            out["revenue"] = out["units_sold"] * out["price"]
+        else:
+            logger.warning("price not available; revenue set to 0")
+            out["revenue"] = 0.0
+
+        # Margin proxy
+        if "price" in out.columns and "cost" in out.columns:
+            out["cost"] = pd.to_numeric(out["cost"], errors="coerce").fillna(0.0)
+            out["margin_proxy"] = out["units_sold"] * (out["price"] - out["cost"])
+        else:
+            logger.warning("cost/price not fully available; margin_proxy set to 0")
+            out["margin_proxy"] = 0.0
+
+        out["revenue"] = out["revenue"].round(3)
+        out["margin_proxy"] = out["margin_proxy"].round(3)
+
+        # Final column order (explicit contract)
+        out = out[
+            [
+                "date",
+                "store_id",
+                "sku_id",
+                "units_sold",
+                "revenue",
+                "margin_proxy",
+                "promo_flag",
+                "holiday_flag",
+                "day_of_week",
+            ]
         ]
 
-        missing = [c for c in required_cols if c not in sales.columns]
-        if missing:
-            raise ValueError(f"Missing required columns in sales data: {missing}")
-        
-        df = sales[required_cols].copy()
-
-        df["units_sold"] = pd.to_numeric(df["units_sold"], errors="coerce").fillna(0)
-        df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
-        df["margin_proxy"] = pd.to_numeric(df["margin_proxy"], errors="coerce").fillna(0)
-
-        
-        # Calendar flags must be integers
-        for col in ["promo_flag", "holiday_flag", "day_of_week"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-
-        logger.info("fact_sales_store_sku_daily built successfully")
-        return df
+        logger.info("Sales fact table created successfully")
+        return out
 
     except Exception as exc:
         logger.exception("Failed to build fact sales | Error: %s", exc)
         raise
 
 # Function to build the fact_inventory_store_sku_daily dataset by merging inventory with sales to calculate stockout flags and days of cover
-def build_fact_inventory(inventory, sales, config, logger):
-    """
-    Output 2: fact_inventory_store_sku_daily.csv
-    Required columns:
-      date, store_id, sku_id, on_hand_units, stockout_flag, days_of_cover
-    days_of_cover = on_hand_units / avg_daily_demand_4w
-    """
+def build_fact_inventory(inventory, sales, logger):
     try:
+        cover_window_days = 28
         logger.info("Building fact_inventory_store_sku_daily")
 
-        inventory = inventory.copy()
-        sales = sales.copy()
+        inv = inventory.copy()
 
-        # Rename inventory close to on_hand_units
-        if "on_hand_close" in inventory.columns:
-            inventory["on_hand_units"] = pd.to_numeric(inventory["on_hand_close"], errors="coerce").fillna(0)
-        elif "on_hand_units" in inventory.columns:
-            inventory["on_hand_units"] = pd.to_numeric(inventory["on_hand_units"], errors="coerce").fillna(0)
-        else:
-            raise ValueError("Inventory data missing on_hand_close/on_hand_units column")
+        # Standardize identifiers
+        inv = standardize_ids(inv, ["store_id", "sku_id"], logger)
 
-        max_date = sales["date"].max()
-        start = max_date - pd.Timedelta(days=config.cover_window_days - 1)
+        # Date handling
+        inv = coerce_datetime(inv, "date", logger)
 
-        demand_4w = (
-            sales.loc[(sales["date"] >= start) & (sales["date"] <= max_date)]
-            .groupby(["store_id", "sku_id"], as_index=False)["units_sold"]
-            .mean()
-            .rename(columns={"units_sold": "avg_daily_demand_4w"})
+        # Inventory units
+        if "on_hand_close" not in inv.columns:
+            logger.warning("inventory missing on_hand_close; defaulting to NaN")
+            inv["on_hand_close"] = pd.NA
+
+        inv["on_hand_close"] = pd.to_numeric(inv["on_hand_close"], errors="coerce")
+
+        # Deduplicate: keep last snapshot per day-store-sku
+        inv = (
+            inv.sort_values("date")
+               .drop_duplicates(subset=["date", "store_id", "sku_id"], keep="last")
         )
 
-        df = inventory.merge(demand_4w, on=["store_id", "sku_id"], how="left")
-        df["avg_daily_demand_4w"] = pd.to_numeric(df["avg_daily_demand_4w"], errors="coerce").fillna(0.01)
+        # Ensure continuous daily grid
+        inv = ensure_complete_daily_grid(
+            inv,
+            date_col="date",
+            key_cols=["store_id", "sku_id"],
+            logger=logger
+        )
 
-        df["stockout_flag"] = (df["on_hand_units"] == 0).astype(int)
-        df["days_of_cover"] = df["on_hand_units"] / df["avg_daily_demand_4w"]
+        # Forward fill inventory within store-sku
+        inv = inv.sort_values(["store_id", "sku_id", "date"])
+        inv["on_hand_units"] = (
+            inv.groupby(["store_id", "sku_id"])["on_hand_close"]
+               .ffill()
+               .fillna(0.0)
+        )
 
-        out = df[
+        # Stockout flag (strict requirement: on_hand == 0)
+        inv["stockout_flag"] = (inv["on_hand_units"] == 0).astype(int)
+
+        # --------------------------------------------------
+        # Demand calculation (avg daily demand over 4 weeks)
+        # --------------------------------------------------
+        sales_demand = sales.copy()
+        sales_demand = standardize_ids(sales_demand, ["store_id", "sku_id"], logger)
+        sales_demand = coerce_datetime(sales_demand, "date", logger)
+
+        if "units_sold" not in sales_demand.columns:
+            raise ValueError("sales data missing units_sold; cannot compute days_of_cover")
+
+        sales_demand["units_sold"] = pd.to_numeric(
+            sales_demand["units_sold"], errors="coerce"
+        ).fillna(0.0)
+
+        max_date = sales_demand["date"].max()
+        window_start = max_date - pd.Timedelta(days=cover_window_days - 1) # Use cover_window_days for demand stats calculation
+
+        recent_sales = sales_demand[
+            sales_demand["date"].between(window_start, max_date)
+        ]
+
+        avg_demand = (
+            recent_sales.groupby(["store_id", "sku_id"], as_index=False)["units_sold"]
+                        .mean()
+                        .rename(columns={"units_sold": "avg_daily_demand_4w"})
+        )
+
+        inv = inv.merge(avg_demand, on=["store_id", "sku_id"], how="left")
+
+        inv["avg_daily_demand_4w"] = (
+            pd.to_numeric(inv["avg_daily_demand_4w"], errors="coerce")
+              .fillna(0.0)
+        )
+
+        # Days of cover (safe divide)
+        inv["days_of_cover"] = 0.0
+        non_zero_demand = inv["avg_daily_demand_4w"] > 0
+
+        inv.loc[non_zero_demand, "days_of_cover"] = (
+            inv.loc[non_zero_demand, "on_hand_units"]
+            / inv.loc[non_zero_demand, "avg_daily_demand_4w"]
+        )
+
+        inv["days_of_cover"] = inv["days_of_cover"].round(3)
+
+        # Final output schema (explicit contract)
+        inv = inv[
             [
-                "date", "store_id", "sku_id",
-                "on_hand_units", "stockout_flag", "days_of_cover"
+                "date",
+                "store_id",
+                "sku_id",
+                "on_hand_units",
+                "stockout_flag",
+                "days_of_cover",
             ]
-        ].copy()
+        ]
 
-        return out
+        logger.info("Inventory fact table created successfully")
+        return inv
 
     except Exception as exc:
-        logger.exception("Failed to build fact inventory | Error: %s", exc)
+        logger.exception("Failed to build fact_inventory_store_sku_daily | Error: %s", exc)
         raise
 
 # Function to build the replenishment_inputs_store_sku dataset by calculating demand statistics, lead time, service level, safety stock, reorder point, and recommended order quantity for each store-sku combination
-def build_replenishment_inputs(sales, purchase_orders, products, config, logger):
-    """
-    Output 3: replenishment_inputs_store_sku.csv
 
-    For each store-sku:
-      avg_daily_demand (last 4-8 weeks) -> using demand_window_days
-      demand_std_dev
-      lead_time_days (from purchase_orders)
-      service_level_target (category-based)
-      reorder_point, safety_stock, recommended_order_qty
-    """
+def build_replenishment_inputs(sales, purchase_orders, products, logger):
     try:
         logger.info("Building replenishment_inputs_store_sku")
 
-        max_date = sales["date"].max()
-        start = max_date - pd.Timedelta(days=config.demand_window_days - 1) # Use demand_window_days for demand stats calculation
-        recent = sales.loc[(sales["date"] >= start) & (sales["date"] <= max_date)].copy() # Focus on recent demand for replenishment inputs
+        # ----------------------------
+        # Configuration
+        # ----------------------------
+        demand_window_days = 56      # 8 weeks (meets 4–8 week requirement)
+        cover_window_days = 28       # next cycle (4 weeks)
+        default_lead_time_days = 3.0
+        default_service_level = 0.95
 
-        # Calculate demand stats for each store-sku
-        stats = (
+        # ----------------------------
+        # Validate and prepare sales
+        # ----------------------------
+        required_sales_cols = ["date", "store_id", "sku_id", "units_sold"]
+        missing = [c for c in required_sales_cols if c not in sales.columns]
+        if missing:
+            raise ValueError(f"sales missing required columns: {missing}")
+
+        df_sales = sales.copy()
+        df_sales["date"] = pd.to_datetime(df_sales["date"], errors="coerce")
+        df_sales["units_sold"] = pd.to_numeric(df_sales["units_sold"], errors="coerce").fillna(0.0)
+
+        max_date = df_sales["date"].max()
+        if pd.isna(max_date):
+            raise ValueError("sales contains no valid dates")
+
+        start_date = max_date - pd.Timedelta(days=demand_window_days - 1)
+        recent = df_sales.loc[
+            (df_sales["date"] >= start_date) & (df_sales["date"] <= max_date)
+        ].copy()
+
+        # ----------------------------
+        # Demand statistics
+        # ----------------------------
+        demand_stats = (
             recent.groupby(["store_id", "sku_id"], as_index=False)["units_sold"]
-            .agg(avg_daily_demand="mean", demand_std_dev="std")
-        )
-        stats["demand_std_dev"] = stats["demand_std_dev"].fillna(0.0) # If only one data point, std dev is NaN. Treat as 0 variability.
-
-        # Calculate average lead time from purchase orders
-        lead_time = (
-            purchase_orders.groupby(["store_id", "sku_id"], as_index=False)["lead_time_days"]
-            .mean()
+                  .agg(avg_daily_demand="mean", demand_std_dev="std")
         )
 
-        # Merge demand stats with lead time
-        df = stats.merge(lead_time, on=["store_id", "sku_id"], how="left")
+        demand_stats["avg_daily_demand"] = (
+            pd.to_numeric(demand_stats["avg_daily_demand"], errors="coerce")
+              .fillna(0.0)
+        )
+        demand_stats["demand_std_dev"] = (
+            pd.to_numeric(demand_stats["demand_std_dev"], errors="coerce")
+              .fillna(0.0)
+        )
 
-        # Fill missing lead times with global median or a default value (e.g., 3 days)
-        global_median_lt = purchase_orders["lead_time_days"].median() if "lead_time_days" in purchase_orders.columns else 3
-        df["lead_time_days"] = df["lead_time_days"].fillna(global_median_lt)
-        df["lead_time_days"] = df["lead_time_days"].clip(lower=0) # Ensure no negative lead times
+        # ----------------------------
+        # Lead time from purchase orders
+        # ----------------------------
+        po = purchase_orders.copy() if purchase_orders is not None else pd.DataFrame()
 
-        df = df.merge(products[["sku_id", "category"]], on="sku_id", how="left")
+        if (
+            len(po) > 0
+            and {"store_id", "sku_id", "lead_time_days"}.issubset(po.columns)
+        ):
+            po["lead_time_days"] = pd.to_numeric(po["lead_time_days"], errors="coerce")
+            lead_time = (
+                po.groupby(["store_id", "sku_id"], as_index=False)["lead_time_days"]
+                  .median()
+            )
 
-        # category-based service level policy
+            global_median_lt = po["lead_time_days"].median()
+            if pd.isna(global_median_lt):
+                global_median_lt = default_lead_time_days
+        else:
+            lead_time = pd.DataFrame(columns=["store_id", "sku_id", "lead_time_days"])
+            global_median_lt = default_lead_time_days
+
+        # ----------------------------
+        # Merge demand + lead time
+        # ----------------------------
+        out = demand_stats.merge(
+            lead_time, on=["store_id", "sku_id"], how="left"
+        )
+
+        out["lead_time_days"] = (
+            pd.to_numeric(out["lead_time_days"], errors="coerce")
+              .fillna(global_median_lt)
+              .clip(lower=0.0)
+        )
+
+        # ----------------------------
+        # Product category & service level
+        # ----------------------------
+        prod = products.copy() if products is not None else pd.DataFrame()
+
+        if "sku_id" not in prod.columns:
+            prod["sku_id"] = pd.NA
+        if "category" not in prod.columns:
+            prod["category"] = "unknown"
+
+        prod = prod[["sku_id", "category"]].drop_duplicates(subset=["sku_id"])
+        prod["category"] = normalize_category(prod["category"])
+
+        out = out.merge(prod, on="sku_id", how="left")
+        out["category"] = out["category"].fillna("unknown")
+
         service_level_map = {
             "dairy": 0.95,
             "grocery": 0.97,
             "snacks": 0.96,
             "beverages": 0.96,
-            "homecare": 0.94,
-            "personalcare": 0.94,
+            "home_care": 0.94,
+            "personal_care": 0.94,
         }
-        df["service_level_target"] = df["category"].map(service_level_map).fillna(0.95)
 
-        # Z-score
-        try:
-            from scipy.stats import norm
-            df["z_score"] = df["service_level_target"].apply(lambda x: float(norm.ppf(x))) 
-        except Exception:
-            approx = {0.90: 1.282, 0.94: 1.555, 0.95: 1.645, 0.96: 1.751, 0.97: 1.881, 0.98: 2.054, 0.99: 2.326}
-            df["z_score"] = df["service_level_target"].round(2).map(approx).fillna(1.645)
+        out["service_level_target"] = (
+            out["category"].map(service_level_map).fillna(default_service_level)
+        )
 
-        df["safety_stock"] = (df["z_score"] * df["demand_std_dev"] * np.sqrt(df["lead_time_days"].clip(lower=0))).round(2)
-        df["reorder_point"] = (df["avg_daily_demand"] * df["lead_time_days"] + df["safety_stock"]).round(2)
-        df["recommended_order_qty"] = (np.ceil(df["avg_daily_demand"] * config.cover_window_days)).clip(lower=0)
+        out["service_level_target"] = (
+            pd.to_numeric(out["service_level_target"], errors="coerce")
+              .fillna(default_service_level)
+        )
 
-        out = df[
+        # ----------------------------
+        # Z-score using SciPy
+        # ----------------------------
+        out["z_score"] = out["service_level_target"].apply(
+            lambda p: float(norm.ppf(p))
+        )
+
+        # ----------------------------
+        # Safety stock & ROP
+        # ----------------------------
+        out["safety_stock"] = (
+            out["z_score"]
+            * out["demand_std_dev"]
+            * np.sqrt(out["lead_time_days"])
+        )
+
+        out["reorder_point"] = (
+            out["avg_daily_demand"] * out["lead_time_days"]
+            + out["safety_stock"]
+        )
+
+        # ----------------------------
+        # Recommended order quantity
+        # ----------------------------
+        out["recommended_order_qty"] = np.ceil(
+            out["avg_daily_demand"] * cover_window_days
+        ).clip(lower=0.0)
+
+        # Rounding for output
+        out["safety_stock"] = out["safety_stock"].round(2)
+        out["reorder_point"] = out["reorder_point"].round(2)
+        out["recommended_order_qty"] = out["recommended_order_qty"].round(0)
+
+        
+        out["avg_daily_demand"] = out["avg_daily_demand"].round(3)
+        out["demand_std_dev"] = out["demand_std_dev"].round(3)
+
+        # ----------------------------  
+        # Final output schema
+        # ----------------------------
+        out = out[
             [
-                "store_id", "sku_id",
-                "avg_daily_demand", "demand_std_dev",
-                "lead_time_days", "service_level_target",
-                "reorder_point", "safety_stock",
+                "store_id",
+                "sku_id",
+                "avg_daily_demand",
+                "demand_std_dev",
+                "lead_time_days",
+                "service_level_target",
+                "reorder_point",
+                "safety_stock",
                 "recommended_order_qty",
             ]
         ].copy()
 
+        logger.info(
+            "Replenishment inputs built successfully | rows=%d", len(out)
+        )
         return out
 
     except Exception as exc:
-        logger.exception("Failed to build replenishment inputs | Error: %s", exc)
+        logger.exception(
+            "Failed to build replenishment inputs | Error: %s", exc
+        )
         raise
 
+# Validation function to ensure required columns are present        
+def validate_minimum(df, required_cols, name):
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError("%s missing required columns: %s" % (name, missing))
+    if len(df) == 0:
+        raise ValueError("%s has 0 rows after processing." % name)
 
 # ============================================================
 # MAIN
 # ============================================================
 def run_pipeline():
-    # CONFIG should already have .logger, .output_dir, .logs_dir, etc.
-    CONFIG = PipelineConfig()
-    logger = CONFIG.logger
+    if "__file__" in globals():
+        base_dir = Path(__file__).resolve().parent.parent
+    else:
+        base_dir = Path.cwd().resolve()
+
+    output_dir = base_dir / "data"
+    logs_dir = base_dir / "logs"
+    plots_dir = output_dir / "plots"
+    required_library_path = base_dir / "requirements.txt"
+
+    ensure_dirs([output_dir, logs_dir, plots_dir])
+
+    logger = setup_logging(logs_dir / "retail_demand_forecasting_etl.log", LOG_LEVEL)
+    log_banner(logger, "Retail Demand Forecasting - ETL Pipeline (Start)")
 
     try:
-        ensure_dirs([CONFIG.output_dir, CONFIG.logs_dir], logger)
-        # Build PATHS and FOUND_FILES
-        PATHS = build_paths(CONFIG)
-        FOUND_FILES = build_found_files(CONFIG, logger)
+        logger.info("Script/base directory: %s", base_dir)
 
-        install_packages(CONFIG.required_library_path, logger)
+        # Install required packages
+        install_package(required_library_path, logger)
 
-        log_banner(logger, "Retail Demand Forecasting - ETL Pipeline")
+        base_dir = Path(__file__).resolve().parent
 
-        # Load raw data
-        sales_raw, inv_raw, products_raw, cal_raw, po_raw, stores_raw = load_raw_datasets(FOUND_FILES, logger)
+        # Resolve input files
+        inputs = resolve_inputs_raw_files(base_dir, REQUIRED_FILES, logger)
 
-        # Clean data
-        calendar = clean_calendar(cal_raw, logger)
+        sales_raw = read_csv_safely(inputs["sales"], logger)
+        inventory_raw = read_csv_safely(inputs["inventory"], logger)
+        calendar_raw = read_csv_safely(inputs["calendar"], logger)
+        purchase_orders_raw = read_csv_safely(inputs["purchase_orders"], logger)
+        stores_raw = read_csv_safely(inputs["stores"], logger)
+        products_raw = read_json_safely(inputs["products"], logger)
+
+        calendar = clean_calendar(calendar_raw, logger)
         stores = clean_stores(stores_raw, logger)
         products = clean_products(products_raw, logger)
-        purchase_orders = clean_purchase_orders(po_raw, logger)
+        purchase_orders = clean_purchase_orders(purchase_orders_raw, logger)
 
-        sales = clean_sales(sales_raw, calendar, logger)
-        inventory = clean_inventory(inv_raw, logger)
+        fact_sales = build_fact_sales(sales_raw, calendar, products, logger)
+        fact_inventory = build_fact_inventory(inventory_raw, sales_raw, logger)
 
-        # Outliers + boxplot
-        if "units_sold" in sales.columns:
-            sales = add_outlier_flag_iqr_by_group(
-                sales,
+        if "units_sold" in fact_sales.columns:
+            fact_sales = add_outlier_flag_iqr_by_group(
+                fact_sales,
                 group_cols=["store_id", "sku_id"],
                 value_col="units_sold",
                 flag_col="outlier_flag",
-                logger=logger
+                logger=logger,
+            )
+            save_boxplot(
+                fact_sales,
+                value_col="units_sold",
+                title="Boxplot – units_sold (all store-sku)",
+                out_path=plots_dir / "units_sold_boxplot.png",
+                logger=logger,
             )
 
-            plot_path = PATHS["plots"] / "units_sold_boxplot.png"
-            save_boxplot(sales, "units_sold", "Boxplot – units_sold", plot_path, logger)
-
         # Build curated outputs (your existing build_fact_* functions can be reused)
-        fact_sales = build_fact_sales(sales, logger)
-        fact_inventory = build_fact_inventory(inventory, sales, CONFIG, logger)
-        repl_inputs = build_replenishment_inputs(sales, purchase_orders, products, CONFIG, logger)
+        repl_inputs = build_replenishment_inputs(fact_sales, purchase_orders, products, logger)
 
-        # Save outputs
-        out_sales_path = PATHS["output"] / CONFIG.out_fact_sales
-        out_inv_path = PATHS["output"] / CONFIG.out_fact_inventory
-        out_repl_path = PATHS["output"] / CONFIG.out_replenishment
+        validate_minimum(fact_sales, ["date", "store_id", "sku_id", "units_sold"], "fact_sales")
+        validate_minimum(fact_inventory, ["date", "store_id", "sku_id", "on_hand_units", "stockout_flag", "days_of_cover"], "fact_inventory")
+        validate_minimum(repl_inputs, ["store_id", "sku_id"], "repl_inputs")
 
-        logger.info("Saving outputs to %s", PATHS["output"])
-        fact_sales.to_csv(out_sales_path, index=False)
-        fact_inventory.to_csv(out_inv_path, index=False)
-        repl_inputs.to_csv(out_repl_path, index=False)
+        out_sales = output_dir / "fact_sales_store_sku_daily.csv"
+        out_inv = output_dir / "fact_inventory_store_sku_daily.csv"
+        out_repl = output_dir / "replenishment_inputs_store_sku.csv"
 
-        log_banner(logger, "Outputs Generated")
-        logger.info("✅ %s -> %s", CONFIG.out_fact_sales, out_sales_path)
-        logger.info("✅ %s -> %s", CONFIG.out_fact_inventory, out_inv_path)
-        logger.info("✅ %s -> %s", CONFIG.out_replenishment, out_repl_path)
+        logger.info("Writing outputs to %s", output_dir)
+        fact_sales.to_csv(out_sales, index=False)
+        fact_inventory.to_csv(out_inv, index=False)
+        repl_inputs.to_csv(out_repl, index=False)
 
-        # Quick checks
         log_banner(logger, "Quick Quality Checks")
-        logger.info("Project root: %s", CONFIG.project_root)
-        logger.info("Rows – Sales fact: %s", f"{len(fact_sales):,}")
-        logger.info("Rows – Inventory fact: %s", f"{len(fact_inventory):,}")
-        logger.info("Rows – Replenishment inputs: %s", f"{len(repl_inputs):,}")
+        logger.info("Rows – Sales fact: %s", "{:,}".format(len(fact_sales)))
+        logger.info("Rows – Inventory fact: %s", "{:,}".format(len(fact_inventory)))
+        logger.info("Rows – Replenishment inputs: %s", "{:,}".format(len(repl_inputs)))
 
-        if "outlier_flag" in sales.columns:
-            logger.info("Outliers flagged (units_sold): %s", f"{int(sales['outlier_flag'].sum()):,}")
+        if "outlier_flag" in fact_sales.columns:
+            logger.info("Outliers flagged (units_sold): %s", "{:,}".format(int(fact_sales["outlier_flag"].sum())))
 
-        # Example: top stockouts
-        stockouts = fact_inventory.groupby(["store_id", "sku_id"], as_index=False)["stockout_flag"].sum()
-        stockouts = stockouts.sort_values("stockout_flag", ascending=False).head(10)
+        stockouts = (
+            fact_inventory.groupby(["store_id", "sku_id"], as_index=False)["stockout_flag"]
+                          .sum()
+                          .sort_values("stockout_flag", ascending=False)
+                          .head(10)
+        )
         logger.info("Top 10 store-sku by stockout days:\n%s", stockouts.to_string(index=False))
 
-        # keep for lint clarity
         _ = stores
 
-        logger.info("ETL completed successfully ✅")
+        log_banner(logger, "ETL completed successfully ✅")
+        return 0
 
     except Exception as exc:
         logger.exception("ETL pipeline failed ❌ | Error: %s", exc)
