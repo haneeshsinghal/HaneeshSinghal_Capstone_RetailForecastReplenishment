@@ -1,6 +1,8 @@
 # Retail Demand Forecasting & Inventory Replenishment Planner
 
-# PART A
+<details>
+
+# <summary>PART A - Framing</summary>
 
 ## 1) Business Objective
 
@@ -95,6 +97,7 @@ This structure ensures operational focus on availability, financial visibility f
 ### Forecast Quality (Demand Signal)
 
 1. **WAPE (Weighted Absolute Percentage Error)**
+
    ```
    WAPE = Σ|Actual − Forecast| / ΣActual
    ```
@@ -104,6 +107,7 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 2. **MAPE (Mean Absolute Percentage Error)**
+
    ```
    MAPE = avg(|Actual − Forecast| / Actual)
    ```
@@ -113,6 +117,7 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 3. **Forecast Bias (Signed Error / Tracking Signal)**
+
    ```
    Bias = Σ(Forecast − Actual) / ΣActual
    ```
@@ -124,6 +129,7 @@ This structure ensures operational focus on availability, financial visibility f
 ### Availability / Stockout Outcomes
 
 4. **Stockout Rate (Days)**
+
    ```
    Stockout Rate = Days with On-Hand = 0 / Total Days
    ```
@@ -138,6 +144,7 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 6. **Lost Sales Proxy (Units / ₹)**
+
    ```
    Lost Units = Σ(Forecasted Demand − Sales) on stockout days 
    Lost ₹ = Lost Units × Price
@@ -150,6 +157,7 @@ This structure ensures operational focus on availability, financial visibility f
 ### Inventory Efficiency / Cost
 
 7. **Days of Inventory on Hand (DOH)**
+
    ```
    DOH = On-hand Units / Avg Daily Forecasted Demand
    ```
@@ -159,6 +167,7 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 8. **Overstock Rate**
+
    ```
    % of SKUs where DOH > Threshold
    ```
@@ -168,6 +177,7 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 9. **Inventory Turns (Proxy)**
+
    ```
    Turns = Sales / Avg Inventory
    ```
@@ -177,11 +187,13 @@ This structure ensures operational focus on availability, financial visibility f
 ---
 
 10. **Inventory Turns (Proxy)**
-      ```
-      Turns = Sales / Avg Inventory
-      ```
 
-      **Reason:** Indicates how efficiently inventory is moving.
+    ```
+    Turns = Sales / Avg Inventory
+    ```
+
+    **Reason:** Indicates how efficiently inventory is moving.
+
 ---
 
 ## 4) Scope Definition
@@ -231,47 +243,48 @@ These should guide what the dashboard and narrative must answer.
    Prevent excess ordering when DOH exceeds shelf life days.
 
 ---
+</details>
 
-## Forecasting Method Used
 
-### Primary Method: Time-Series Demand Forecasting with Calendar & Business Signals
+## Project Overview
+This project builds an end-to-end analytics and planning solution for a multi-store retail business facing two core problems:
+- **Stockouts** → lost sales and poor customer experience
+- **Overstock** → blocked working capital and higher holding costs
 
-Demand is forecasted at the **Store–SKU–Day** level using a **time-series forecasting approach**, where historical sales patterns are combined with calendar and business drivers.
+The solution combines **demand forecasting**, **inventory risk monitoring**, and a **replenishment policy** into an interactive Tableau dashboard that enables data-backed purchase decisions at the **store–SKU level**.
 
-**Key components:**
 
-- **Historical sales trends** (level, seasonality, day-of-week effects)
-- **Calendar features** from `calendar.csv` (weekday, holidays, promotions)
-- **Stockout-aware adjustment**:
-  When on-hand inventory is zero, observed sales are treated as *censored*, and demand is inferred from the model rather than raw sales.
+### North Star KPI
+**Fill Rate (Service Level)**  
+> Measures how much true customer demand is fulfilled.
 
-**Why this method was chosen:**
-
-- Well-suited for short-term horizons (**28 days**)
-- Interpretable and explainable for business stakeholders
-- Scales efficiently across thousands of Store–SKU combinations
-- Naturally supports replenishment logic (ROP + Safety Stock)
+Improving Fill Rate while controlling inventory levels is the primary objective of this project.
 
 ---
 
-### Model Type (Conceptual)
 
-- **Baseline:** Moving Average / Exponential Smoothing (per SKU–store)
-- **Enhanced:** Time-series regression with calendar effects
-  (trend + seasonality + promo/holiday flags)
+## Forecasting Methods Used
+Forecasting is performed at the **Store–SKU–Day** level with a **28-day (4-week) horizon**.
+
+### Demand Signal / Forecast Proxy
+- **Baseline demand proxy**:  
+  `avg_daily_demand` computed from the most recent 4–8 weeks
+- Used consistently across:
+  - Lost sales estimation
+  - Fill rate computation
+  - Replenishment planning inputs
+
+### Forecast Accuracy Metrics
+The following metrics are computed to evaluate forecast quality:
+- **MAPE (Mean Absolute Percentage Error)**  
+  Average daily percentage error (excluding zero-sales days)
+- **WAPE (Weighted Absolute Percentage Error)**  
+  Volume-weighted error, stable across high/low volume SKUs
+- **Forecast Bias**  
+  Signed error indicating over- or under-forecasting
+
+These metrics are used for diagnostic purposes and decision confidence, not to tune models inside Tableau.
 
 ---
 
-### Output
 
-- Daily demand forecasts per Store–SKU
-- Aggregated forecasts at weekly, store, and category levels
-- Forecast error metrics (WAPE, MAPE, Bias) used for validation
-
----
-
-This approach balances **accuracy, interpretability, and operational usability**, making it suitable for inventory planning and replenishment decisions.
-
----
-
-# PART B
