@@ -56,7 +56,9 @@ These metrics are used for diagnostic purposes and decision confidence, not to t
   - sales_daily.csv
   - stores.csv
 - Open the command prompt and give following command
-  `cd etl`
+  ```
+  cd etl
+  ```
 - run the following command to execute `etl_pipeline.py`
   ```
   python .\etl_pipeline.py
