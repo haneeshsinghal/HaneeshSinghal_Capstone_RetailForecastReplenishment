@@ -267,6 +267,7 @@ def save_boxplot(df, value_col, title, out_path, logger):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Saving boxplot -> %s", out_path)
 
+        # Display the Boxplot
         plt.figure(figsize=(12, 5))
         sns.boxplot(x=df[value_col].dropna())
         plt.title(title)
@@ -884,11 +885,11 @@ def run_pipeline():
 
         _ = stores
 
-        log_banner(logger, "ETL completed successfully ✅")
+        log_banner(logger, "ETL completed successfully.")
         return 0
 
     except Exception as exc:
-        logger.exception("ETL pipeline failed ❌ | Error: %s", exc)
+        logger.exception("ETL pipeline failed | Error: %s", exc)
         sys.exit(1)	
 
 
